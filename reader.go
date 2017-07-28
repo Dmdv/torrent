@@ -11,7 +11,13 @@ import (
 	"golang.org/x/net/context"
 )
 
-// Accesses torrent data via a client.
+// Piece range by piece index, [begin, end).
+type pieceRange struct {
+	begin, end int
+}
+
+// Accesses Torrent data via a Client. Reads block until the data is
+// available. Seeks and readahead also drive Client behaviour.
 type Reader struct {
 	t          *Torrent
 	responsive bool
@@ -24,6 +30,10 @@ type Reader struct {
 	mu        sync.Locker
 	pos       int64
 	readahead int64
+	// The cached piece range this reader wants downloaded. The zero value
+	// corresponds to nothing. We cache this so that changes can be detected,
+	// and bubbled up to the Torrent only as required.
+	pieces pieceRange
 }
 
 var _ io.ReadCloser = &Reader{}
@@ -34,6 +44,11 @@ func (r *Reader) SetResponsive() {
 	r.responsive = true
 }
 
+// Disable responsive mode.
+func (r *Reader) SetNonResponsive() {
+	r.responsive = false
+}
+
 // Configure the number of bytes ahead of a read that should also be
 // prioritized in preparation for further reads.
 func (r *Reader) SetReadahead(readahead int64) {
@@ -42,7 +57,12 @@ func (r *Reader) SetReadahead(readahead int64) {
 	r.mu.Unlock()
 	r.t.cl.mu.Lock()
 	defer r.t.cl.mu.Unlock()
-	r.tickleClient()
+	r.posChanged()
+}
+
+// Return reader's current position.
+func (r *Reader) CurrentPos() int64 {
+	return r.pos
 }
 
 func (r *Reader) readable(off int64) (ret bool) {
@@ -88,8 +108,18 @@ func (r *Reader) tickleClient() {
 func (r *Reader) waitReadable(off int64) {
 	// We may have been sent back here because we were told we could read but
 	// it failed.
-	r.tickleClient()
 	r.t.cl.event.Wait()
+}
+
+// Calculates the pieces this reader wants downloaded, ignoring the cached
+// value at r.pieces.
+func (r *Reader) piecesUncached() (ret pieceRange) {
+	ra := r.readahead
+	if ra < 1 {
+		ra = 1
+	}
+	ret.begin, ret.end = r.t.byteRegionPieces(r.pos, ra)
+	return
 }
 
 func (r *Reader) Read(b []byte) (n int, err error) {
@@ -178,22 +208,29 @@ func (r *Reader) readOnceAt(b []byte, pos int64, ctxErr *error) (n int, err erro
 			err = nil
 			return
 		}
-		log.Printf("error reading torrent %q piece %d offset %d, %d bytes: %s", r.t, pi, po, len(b1), err)
 		r.t.cl.mu.Lock()
+		log.Printf("error reading torrent %q piece %d offset %d, %d bytes: %s", r.t, pi, po, len(b1), err)
 		r.t.updateAllPieceCompletions()
-		r.t.updatePiecePriorities()
+		r.t.updateAllPiecePriorities()
 		r.t.cl.mu.Unlock()
 	}
 }
 
 func (r *Reader) Close() error {
+	r.t.cl.mu.Lock()
+	defer r.t.cl.mu.Unlock()
 	r.t.deleteReader(r)
-	r.t = nil
 	return nil
 }
 
 func (r *Reader) posChanged() {
-	r.t.readersChanged()
+	to := r.piecesUncached()
+	from := r.pieces
+	if to == from {
+		return
+	}
+	r.pieces = to
+	r.t.readerPosChanged(from, to)
 }
 
 func (r *Reader) Seek(off int64, whence int) (ret int64, err error) {

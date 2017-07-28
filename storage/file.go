@@ -13,34 +13,74 @@ import (
 // File-based storage for torrents, that isn't yet bound to a particular
 // torrent.
 type fileClientImpl struct {
-	baseDir string
+	baseDir   string
+	pathMaker func(baseDir string, info *metainfo.Info, infoHash metainfo.Hash) string
+	pc        PieceCompletion
 }
 
+// The Default path maker just returns the current path
+func defaultPathMaker(baseDir string, info *metainfo.Info, infoHash metainfo.Hash) string {
+	return baseDir
+}
+
+func infoHashPathMaker(baseDir string, info *metainfo.Info, infoHash metainfo.Hash) string {
+	return filepath.Join(baseDir, infoHash.HexString())
+}
+
+// All Torrent data stored in this baseDir
 func NewFile(baseDir string) ClientImpl {
+	return NewFileWithCompletion(baseDir, pieceCompletionForDir(baseDir))
+}
+
+func NewFileWithCompletion(baseDir string, completion PieceCompletion) ClientImpl {
+	return newFileWithCustomPathMakerAndCompletion(baseDir, nil, completion)
+}
+
+// All Torrent data stored in subdirectorys by infohash
+func NewFileByInfoHash(baseDir string) ClientImpl {
+	return NewFileWithCustomPathMaker(baseDir, infoHashPathMaker)
+}
+
+// Allows passing a function to determine the path for storing torrent data
+func NewFileWithCustomPathMaker(baseDir string, pathMaker func(baseDir string, info *metainfo.Info, infoHash metainfo.Hash) string) ClientImpl {
+	return newFileWithCustomPathMakerAndCompletion(baseDir, pathMaker, pieceCompletionForDir(baseDir))
+}
+
+func newFileWithCustomPathMakerAndCompletion(baseDir string, pathMaker func(baseDir string, info *metainfo.Info, infoHash metainfo.Hash) string, completion PieceCompletion) ClientImpl {
+	if pathMaker == nil {
+		pathMaker = defaultPathMaker
+	}
 	return &fileClientImpl{
-		baseDir: baseDir,
+		baseDir:   baseDir,
+		pathMaker: pathMaker,
+		pc:        completion,
 	}
 }
 
+func (me *fileClientImpl) Close() error {
+	return me.pc.Close()
+}
+
 func (fs *fileClientImpl) OpenTorrent(info *metainfo.Info, infoHash metainfo.Hash) (TorrentImpl, error) {
-	err := CreateNativeZeroLengthFiles(info, fs.baseDir)
+	dir := fs.pathMaker(fs.baseDir, info, infoHash)
+	err := CreateNativeZeroLengthFiles(info, dir)
 	if err != nil {
 		return nil, err
 	}
 	return &fileTorrentImpl{
-		fs,
+		dir,
 		info,
 		infoHash,
-		pieceCompletionForDir(fs.baseDir),
+		fs.pc,
 	}, nil
 }
 
 // File-based torrent storage, not yet bound to a Torrent.
 type fileTorrentImpl struct {
-	fs         *fileClientImpl
+	dir        string
 	info       *metainfo.Info
 	infoHash   metainfo.Hash
-	completion pieceCompletion
+	completion PieceCompletion
 }
 
 func (fts *fileTorrentImpl) Piece(p metainfo.Piece) PieceImpl {
@@ -56,19 +96,18 @@ func (fts *fileTorrentImpl) Piece(p metainfo.Piece) PieceImpl {
 }
 
 func (fs *fileTorrentImpl) Close() error {
-	fs.completion.Close()
 	return nil
 }
 
 // Creates natives files for any zero-length file entries in the info. This is
 // a helper for file-based storages, which don't address or write to zero-
 // length files because they have no corresponding pieces.
-func CreateNativeZeroLengthFiles(info *metainfo.Info, baseDir string) (err error) {
+func CreateNativeZeroLengthFiles(info *metainfo.Info, dir string) (err error) {
 	for _, fi := range info.UpvertedFiles() {
 		if fi.Length != 0 {
 			continue
 		}
-		name := filepath.Join(append([]string{baseDir, info.Name}, fi.Path...)...)
+		name := filepath.Join(append([]string{dir, info.Name}, fi.Path...)...)
 		os.MkdirAll(filepath.Dir(name), 0750)
 		var f io.Closer
 		f, err = os.Create(name)
@@ -176,5 +215,5 @@ func (fst fileTorrentImplIO) WriteAt(p []byte, off int64) (n int, err error) {
 }
 
 func (fts *fileTorrentImpl) fileInfoName(fi metainfo.FileInfo) string {
-	return filepath.Join(append([]string{fts.fs.baseDir, fts.info.Name}, fi.Path...)...)
+	return filepath.Join(append([]string{fts.dir, fts.info.Name}, fi.Path...)...)
 }

@@ -1,7 +1,6 @@
 package motorrent
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/anacrolix/missinggo/pubsub"
@@ -59,6 +58,14 @@ func (t *Torrent) PieceState(piece int) PieceState {
 // obtained first.
 func (t *Torrent) NumPieces() int {
 	return t.numPieces()
+}
+
+// Get missing bytes count for specific piece.
+func (t *Torrent) PieceBytesMissing(piece int) int64 {
+	t.cl.mu.Lock()
+	defer t.cl.mu.Unlock()
+
+	return int64(t.pieces[piece].bytesLeft())
 }
 
 // Drop the torrent from the client, and close it. It's always safe to do
@@ -131,12 +138,10 @@ func (t *Torrent) addReader(r *Reader) {
 		t.readers = make(map[*Reader]struct{})
 	}
 	t.readers[r] = struct{}{}
-	t.readersChanged()
+	r.posChanged()
 }
 
 func (t *Torrent) deleteReader(r *Reader) {
-	t.cl.mu.Lock()
-	defer t.cl.mu.Unlock()
 	delete(t.readers, r)
 	t.readersChanged()
 }
@@ -194,7 +199,7 @@ func (t *Torrent) DownloadAll() {
 func (t *Torrent) String() string {
 	s := t.name()
 	if s == "" {
-		s = fmt.Sprintf("%x", t.infoHash)
+		s = t.infoHash.HexString()
 	}
 	return s
 }

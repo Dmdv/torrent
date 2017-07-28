@@ -8,7 +8,6 @@ import (
 	_ "net/http/pprof"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -102,11 +101,12 @@ func TestUnmountWedged(t *testing.T) {
 	fs := New(client)
 	fuseConn, err := fuse.Mount(layout.MountDir)
 	if err != nil {
-		msg := fmt.Sprintf("error mounting: %s", err)
-		if strings.Contains(err.Error(), "fuse") || err.Error() == "exit status 71" {
-			t.Skip(msg)
+		switch err.Error() {
+		case "cannot locate OSXFUSE",
+			"fusermount: exit status 1":
+			t.Skip(err)
 		}
-		t.Fatal(msg)
+		t.Fatal(err)
 	}
 	go func() {
 		server := fusefs.New(fuseConn, &fusefs.Config{
@@ -186,7 +186,7 @@ func TestDownloadOnDemand(t *testing.T) {
 	defer leecher.Close()
 	leecherTorrent, _ := leecher.AddTorrent(layout.Metainfo)
 	leecherTorrent.AddPeers([]torrent.Peer{
-		torrent.Peer{
+		{
 			IP:   missinggo.AddrIP(seeder.ListenAddr()),
 			Port: missinggo.AddrPort(seeder.ListenAddr()),
 		},

@@ -15,32 +15,45 @@ import (
 
 type mmapStorage struct {
 	baseDir string
+	pc      PieceCompletion
 }
 
 func NewMMap(baseDir string) ClientImpl {
+	return NewMMapWithCompletion(baseDir, pieceCompletionForDir(baseDir))
+}
+
+func NewMMapWithCompletion(baseDir string, completion PieceCompletion) ClientImpl {
 	return &mmapStorage{
 		baseDir: baseDir,
+		pc:      completion,
 	}
 }
 
 func (s *mmapStorage) OpenTorrent(info *metainfo.Info, infoHash metainfo.Hash) (t TorrentImpl, err error) {
 	span, err := mMapTorrent(info, s.baseDir)
 	t = &mmapTorrentStorage{
-		span: span,
-		pc:   pieceCompletionForDir(s.baseDir),
+		infoHash: infoHash,
+		span:     span,
+		pc:       s.pc,
 	}
 	return
 }
 
+func (s *mmapStorage) Close() error {
+	return s.pc.Close()
+}
+
 type mmapTorrentStorage struct {
-	span mmap_span.MMapSpan
-	pc   pieceCompletion
+	infoHash metainfo.Hash
+	span     mmap_span.MMapSpan
+	pc       PieceCompletion
 }
 
 func (ts *mmapTorrentStorage) Piece(p metainfo.Piece) PieceImpl {
 	return mmapStoragePiece{
 		pc:       ts.pc,
 		p:        p,
+		ih:       ts.infoHash,
 		ReaderAt: io.NewSectionReader(ts.span, p.Offset(), p.Length()),
 		WriterAt: missinggo.NewSectionWriter(ts.span, p.Offset(), p.Length()),
 	}
@@ -52,7 +65,7 @@ func (ts *mmapTorrentStorage) Close() error {
 }
 
 type mmapStoragePiece struct {
-	pc pieceCompletion
+	pc PieceCompletion
 	p  metainfo.Piece
 	ih metainfo.Hash
 	io.ReaderAt
